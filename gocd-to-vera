@@ -1,0 +1,102 @@
+#!/usr/bin/env python
+
+#
+# Checks whether GoCD builds have failed.  If so, calls Vera to run a scene
+# which would, e.g. turn the lights on.  Needs two configuration files:
+#
+# 1) gocd.cfg - defines GoCD parameters and the Vera Scene name.
+#
+# {
+#   "server": "https://gocd.myenterprise.com:8154",
+#   "username": "my-user",
+#   "password": "my-password",
+#   "scene": "Red",
+# }
+#
+# 2) vera.cfg - defines Vera location and authentication
+# 
+# {
+#   "remote": {
+#     "user": "vera-user",
+#     "password": "vera-password",
+#     "device": "98765131924"
+#   }
+# }
+#
+
+from yagocd import Yagocd
+import sys
+import json
+import time
+
+# See https://github.com/cybermaggedon/pyvera
+import vera
+
+# Ugly, suppresses GoCD certificate warnings, fix is to sort out certificates
+import requests
+requests.packages.urllib3.disable_warnings()
+
+# Load GoCD configuration
+data = json.loads(open('gocd.cfg').read())
+
+# Connect to GoCD
+go = Yagocd(
+    server=data["server"],
+    auth=(data["username"], data["password"]),
+    options={
+        'verify': False  # skip verification for SSL certificates.
+    }
+)
+
+# Checks GoCD to see if any jobs have failed
+def check_gocd(go):
+
+    # Summarise state of the entire build system into a single boolean, good/bad
+    ok = True
+
+    # Iterate over pipelines
+    for pipeline in go.pipelines:
+
+        # Get last instance from each pipeline
+        instance = pipeline.last()
+
+        # Iterate over all stages
+        for stage in instance:
+
+            # Iterate over all jobs
+            for job in stage:
+
+                # If job fails, report job, and adjust good/bad
+                if job.data.result == 'Failed':
+                    name = "%s > %s > %s" % (pipeline.data.name, \
+                                             stage.data.name, \
+                                             job.data.name)
+                    print name, "failed"
+                    ok = False
+
+    return ok
+
+# Invokes the Vera scene on failure.
+def call_scene():
+
+    # Connect to Vera
+    ve = vera.connect("vera.cfg")
+
+    # Run the scene.
+    for i in ve.get_scenes():
+        if i.name == data["scene"]:
+            i.run()
+
+while True:
+
+    ok = check_gocd(go)
+
+    # If all OK, just continue.
+    if ok:
+        print "Everything OK"
+    else:
+        # Build failed, report this...
+        print "Build failed"
+        call_scene()
+
+    time.sleep(30)
